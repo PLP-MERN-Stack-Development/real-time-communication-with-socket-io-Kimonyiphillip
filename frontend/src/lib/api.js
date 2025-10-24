@@ -1,45 +1,71 @@
 import axios from "axios";
 
-const API = import.meta.env.VITE_API_URL;
+const API_BASE_URL = import.meta.env.VITE_API_URL;
+const TOKEN_TEMPLATE = import.meta.env.VITE_CLERK_JWT_TEMPLATE;
 
-const client = axios.create({
-  baseURL: API,
-  headers: { "Content-Type": "application/json" }
-});
+const createAuthenticatedClient = (getToken) => {
+  const instance = axios.create({
+    baseURL: API_BASE_URL,
+    headers: {
+      "Content-Type": "application/json"
+    }
+  });
 
-// Conversations
-export const ConversationsAPI = {
-  listForUser: async (userId) => {
-    const res = await client.get("/api/conversations", {
-      params: { userId }
-    });
-    return res.data;
-  },
-  startConversation: async ({ userId, targetUserId }) => {
-    const res = await client.post("/api/conversations", {
-      userId,
-      targetUserId
-    });
-    return res.data;
-  }
+  instance.interceptors.request.use(async (config) => {
+    if (typeof getToken !== "function") return config;
+    const token = await getToken(TOKEN_TEMPLATE ? { template: TOKEN_TEMPLATE } : undefined);
+    if (token) {
+      config.headers = {
+        ...config.headers,
+        Authorization: `Bearer ${token}`
+      };
+    }
+    return config;
+  });
+
+  return instance;
 };
 
-// Messages
-export const MessagesAPI = {
-  list: async (conversationId) => {
-    const res = await client.get("/api/messages", {
-      params: { conversationId }
-    });
-    return res.data;
-  },
-  send: async ({ conversationId, senderId, text }) => {
-    const res = await client.post("/api/messages", {
-      conversationId,
-      senderId,
-      text
-    });
+export function createApiClient(getToken) {
+  const client = createAuthenticatedClient(getToken);
 
-    // here we will also emit socket.io "sendMessage"
-    return res.data;
-  }
-};
+  return {
+    users: {
+      async list() {
+        const res = await client.get("/api/users");
+        return res.data;
+      },
+      async syncProfile(payload) {
+        const res = await client.post("/api/users/sync", payload);
+        return res.data;
+      }
+    },
+    conversations: {
+      async list() {
+        const res = await client.get("/api/conversations");
+        return res.data;
+      },
+      async ensureConversation(targetUserId) {
+        const res = await client.post("/api/conversations", { targetUserId });
+        return res.data;
+      },
+      async getDetail(conversationId) {
+        const res = await client.get(`/api/conversations/${conversationId}`);
+        return res.data;
+      }
+    },
+    messages: {
+      async list(conversationId) {
+        const res = await client.get(`/api/messages/${conversationId}`);
+        return res.data;
+      },
+      async send(conversationId, text) {
+        const res = await client.post("/api/messages", {
+          conversationId,
+          text
+        });
+        return res.data;
+      }
+    }
+  };
+}

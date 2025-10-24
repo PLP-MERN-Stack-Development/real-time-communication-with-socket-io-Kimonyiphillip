@@ -1,18 +1,18 @@
 const express = require("express");
 const { requireAuth } = require("../middleware/auth");
-const messageController = require("../controllers/messageController");
+const userController = require("../controllers/userController");
 const router = express.Router();
 
 router.get(
-  "/:conversationId",
+  "/",
   requireAuth,
-  messageController.getMessagesForConversation
+  userController.listUsers
 );
 
 router.post(
-  "/",
+  "/sync",
   requireAuth,
-  messageController.sendMessage
+  userController.syncProfile
 );
 
 module.exports = router;

@@ -12,15 +12,30 @@ const messageSchema = new Schema(
         type: String, // Clerk user id
         required: true
     },
+    senderName: {
+        type: String,
+        required: true
+    },
+    senderAvatar: {
+        type: String,
+        default: ""
+    },
     text: {
         type: String,
         required: true
+    },
+    status: {
+        type: String,
+        enum: ["sent", "delivered", "seen"],
+        default: "sent"
+    },
+    readBy: {
+        type: [String],
+        default: []
     }
   },
   { timestamps: true }
 );
-
-// When we do Socket.IO later, we will broadcast new Message docs in real-time.
 
 const Message = mongoose.model("Message", messageSchema);
 module.exports = Message;

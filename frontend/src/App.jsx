@@ -1,55 +1,75 @@
-import { SignedIn, SignedOut, SignInButton, UserButton, useUser } from "@clerk/clerk-react";
-import ChatLayout from "./components/ChatLayout";
+import {
+  SignedIn,
+  SignedOut,
+  SignInButton,
+  UserButton,
+  useUser
+} from "@clerk/clerk-react";
+import Dashboard from "./pages/Dashboard";
+import { Button } from "./components/ui/button";
 
 export default function App() {
   const { user } = useUser();
+  const displayName = user?.fullName || user?.username || user?.firstName || "Guest";
+  const email = user?.primaryEmailAddress?.emailAddress || "";
 
   return (
-    <div className="min-h-screen flex flex-col bg-slate-900 text-white">
-      {/* Header */}
-      <header className="border-b border-slate-800 bg-slate-900/80 backdrop-blur">
-        <div className="mx-auto max-w-6xl p-4 flex items-center justify-between">
-          <div>
-            <h1 className="text-xl font-bold text-white">Week 5 • Realtime Chat</h1>
-            <p className="text-slate-400 text-xs">
-              MERN • Clerk Auth • Tailwind UI
+    <div className="flex min-h-screen flex-col bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950">
+      <header className="border-b border-white/10 bg-white/[0.03]">
+        <div className="mx-auto flex w-full max-w-6xl items-center justify-between px-4 py-5">
+          <div className="space-y-1">
+            <p className="text-xs font-semibold uppercase tracking-[0.3em] text-indigo-300">
+              Week 5 Lab
+            </p>
+            <h1 className="text-2xl font-semibold text-white">
+              Meridian Chat &mdash; Static Edition
+            </h1>
+            <p className="text-sm text-slate-400">
+              MERN · Clerk Authentication · Tailwind UI · REST messaging
             </p>
           </div>
 
           <div className="flex items-center gap-3">
             <SignedOut>
-              <SignInButton mode="modal" />
+              <SignInButton mode="modal">
+                <Button variant="secondary">Sign in with Clerk</Button>
+              </SignInButton>
             </SignedOut>
             <SignedIn>
-              <div className="flex items-center gap-2">
-                <span className="text-slate-300 text-sm">
-                  {user?.firstName || user?.username || user?.id}
-                </span>
-                <UserButton afterSignOutUrl="/" />
+              <div className="flex items-center gap-3 rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-sm text-slate-200">
+                <span>{displayName}</span>
+                <UserButton afterSignOutUrl="/" showName={false} />
               </div>
             </SignedIn>
           </div>
         </div>
       </header>
 
-      {/* Body */}
-      <main className="flex-1 bg-chat-gradient">
-        <div className="mx-auto max-w-6xl h-[calc(100vh-80px)] py-4">
-          <SignedOut>
-            <div className="text-center text-slate-200 mt-24">
-              <p className="text-lg font-semibold">Please sign in to start chatting 👇</p>
-            </div>
-          </SignedOut>
+      <main className="flex flex-1 flex-col">
+        <SignedOut>
+          <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col items-center justify-center px-4 text-center text-slate-200">
+            <h2 className="text-3xl font-semibold text-white">
+              Welcome to Meridian Chat
+            </h2>
+            <p className="mt-3 text-base text-slate-400">
+              Sign in to sync your Clerk profile and explore the static REST-based chat experience before we go live with Socket.IO.
+            </p>
+            <SignInButton mode="modal">
+              <Button size="lg" className="mt-6">
+                Sign in to continue
+              </Button>
+            </SignInButton>
+          </div>
+        </SignedOut>
 
-          <SignedIn>
-            {/* Pass the current user's id + avatar into the chat layout */}
-            <ChatLayout
-              currentUserId={user?.id}
-              currentAvatar={user?.imageUrl}
-              currentName={user?.firstName || user?.username || "You"}
-            />
-          </SignedIn>
-        </div>
+        <SignedIn>
+          <Dashboard
+            currentUserId={user?.id}
+            currentAvatar={user?.imageUrl}
+            currentName={displayName}
+            currentEmail={email}
+          />
+        </SignedIn>
       </main>
     </div>
   );

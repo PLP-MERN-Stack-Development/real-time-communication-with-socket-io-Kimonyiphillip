@@ -4,33 +4,50 @@ const dotenv = require("dotenv");
 const { connectDB } = require("./config/db");
 const conversationRoutes = require("./routes/conversationRoutes");
 const messageRoutes = require("./routes/messageRoutes");
-// const httpServer = require("http").createServer(app)
-// const { Server } = require("socket.io")
+const userRoutes = require("./routes/userRoutes");
 
 dotenv.config();
 
 const app = express();
 connectDB();
 
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || process.env.ALLOWED_ORIGIN || "")
+  .split(",")
+  .map(origin => origin.trim())
+  .filter(Boolean);
+
 app.use(cors({
-  origin: process.env.ALLOWED_ORIGIN,
-  methods: ["GET", "POST"]
+  origin: allowedOrigins.length ? allowedOrigins : "*",
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 }));
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
+app.use(express.urlencoded({ extended: true }));
 
-// Health
 app.get("/", (req, res) => res.send("Chat API OK"));
+app.get("/healthz", (req, res) => res.json({ status: "ok" }));
 
-// Routes
 app.use("/api/conversations", conversationRoutes);
 app.use("/api/messages", messageRoutes);
+app.use("/api/users", userRoutes);
 
-// SOCKET.IO SERVER WILL GO HERE
+app.use((req, res) => {
+  res.status(404).json({ message: "Not Found" });
+});
 
-// const io = new Server(httpServer, { cors: { origin: process.env.ALLOWED_ORIGIN } })
-// io.on("connection", socket => { ... })
+app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
+  const status = err.statusCode || 500;
+  const response = {
+    message: err.message || "Internal server error"
+  };
+  if (process.env.NODE_ENV !== "production") {
+    response.stack = err.stack;
+  }
+  console.error("API error:", err);
+  res.status(status).json(response);
+});
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`💬 Chat API on http://localhost:${PORT}`);
+  console.log(`Chat API on http://localhost:${PORT}`);
 });
