@@ -19,12 +19,40 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || process.env.ALLOWED_ORIGI
   .map(origin => origin.trim())
   .filter(Boolean);
 
+const defaultOrigins = ["http://localhost:5173", "http://127.0.0.1:5173"];
+
+const corsOrigins = allowedOrigins.length > 0 ? allowedOrigins : defaultOrigins;
+
+if (process.env.NODE_ENV !== "production") {
+  const timestamp = new Date().toISOString();
+  process.stdout.write(`[${timestamp}] CORS origins: ${corsOrigins.join(", ")}\n`);
+}
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    if (!origin || corsOrigins.includes(origin) || corsOrigins.includes("*")) {
+      callback(null, true);
+    } else {
+      if (process.env.NODE_ENV !== "production") {
+        process.stderr.write(`[CORS] Blocked origin: ${origin}\n`);
+      }
+      callback(new Error(`Origin ${origin} not allowed by CORS`));
+    }
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-User-Id"],
+  exposedHeaders: ["Content-Range", "X-Content-Range"],
+  maxAge: 600
+};
+
+app.use(cors(corsOptions));
+
 const io = new Server(httpServer, {
   cors: {
-    origin: allowedOrigins.length
-      ? allowedOrigins
-      : ["http://localhost:5173", "http://127.0.0.1:5173"],
-    credentials: true
+    origin: corsOrigins,
+    credentials: true,
+    methods: ["GET", "POST"]
   }
 });
 
@@ -33,18 +61,6 @@ global.io = io;
 const userPresence = new Map();
 
 io.use(socketAuthMiddleware);
-
-const httpCorsOrigins = allowedOrigins.length
-  ? allowedOrigins
-  : ["http://localhost:5173", "http://127.0.0.1:5173"];
-
-const corsOptions = {
-  origin: httpCorsOrigins,
-  credentials: true,
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
-};
-
-app.use(cors(corsOptions));
 
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
