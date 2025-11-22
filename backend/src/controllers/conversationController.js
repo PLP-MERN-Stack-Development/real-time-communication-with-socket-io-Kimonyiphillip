@@ -14,7 +14,7 @@ const pickProfiles = async (userIds) => {
     map.set(profile.clerkUserId, profile);
   });
 
-  // ensure there is stub record for missing profiles (in case user never synced yet)
+  // Ensure there is stub record for missing profiles
   uniqueIds.forEach((id) => {
     if (!map.has(id)) {
       map.set(id, {
@@ -53,15 +53,18 @@ const mapProfileToPlain = (profile, clerkUserId) => {
 
 const formatConversation = (conversation, profileMap, currentUserId) => {
   const isGroup = conversation.isGroup;
+  const isGlobal = conversation.isGlobal;
   const members = conversation.members.map((id) =>
     mapProfileToPlain(profileMap.get(id), id)
   );
   const otherMembers = members.filter((member) => member.clerkUserId !== currentUserId);
   const primaryMember = otherMembers[0] || members[0];
 
-  const title = conversation.name || (isGroup
-    ? (conversation.name || "Group chat")
-    : primaryMember?.displayName || "Conversation");
+  const title = isGlobal 
+    ? "Global Chat" 
+    : conversation.name || (isGroup
+      ? (conversation.name || "Group chat")
+      : primaryMember?.displayName || "Conversation");
 
   const avatar = isGroup
     ? ""
@@ -73,6 +76,7 @@ const formatConversation = (conversation, profileMap, currentUserId) => {
     id: conversation._id.toString(),
     name: title,
     isGroup,
+    isGlobal,
     avatar,
     members,
     unreadCount: unreadCounts.get
@@ -90,22 +94,45 @@ const formatConversation = (conversation, profileMap, currentUserId) => {
   };
 };
 
+/**
+ * Get user's conversations including global room
+ */
 exports.listMyConversations = asyncHandler(async (req, res) => {
   const currentUserId = req.auth.userId;
 
-  const conversations = await Conversation.find({
-    members: currentUserId
+  // Get personal conversations
+  const personalConversations = await Conversation.find({
+    members: currentUserId,
+    isGlobal: false
   }).sort({ lastMessageAt: -1, updatedAt: -1 });
 
-  const profileMap = await pickProfiles(conversations.flatMap((c) => c.members));
+  // Get global room
+  const globalRoom = await Conversation.findOne({ isGlobal: true });
+  
+  let allConversations = [...personalConversations];
+  
+  // Add user to global room members if not already there
+  if (globalRoom && !globalRoom.members.includes(currentUserId)) {
+    globalRoom.members.push(currentUserId);
+    await globalRoom.save();
+  }
+  
+  if (globalRoom) {
+    allConversations.unshift(globalRoom); // Put global room first
+  }
 
-  const payload = conversations.map((conversation) =>
+  const profileMap = await pickProfiles(allConversations.flatMap((c) => c.members));
+
+  const payload = allConversations.map((conversation) =>
     formatConversation(conversation, profileMap, currentUserId)
   );
 
   res.json(payload);
 });
 
+/**
+ * Create or get 1-on-1 conversation
+ */
 exports.ensureConversation = asyncHandler(async (req, res) => {
   const currentUserId = req.auth.userId;
   const { targetUserId } = req.body;
@@ -120,6 +147,7 @@ exports.ensureConversation = asyncHandler(async (req, res) => {
 
   let conversation = await Conversation.findOne({
     isGroup: false,
+    isGlobal: false,
     members: { $all: [currentUserId, targetUserId], $size: 2 }
   });
 
@@ -140,6 +168,9 @@ exports.ensureConversation = asyncHandler(async (req, res) => {
   res.status(201).json(formatted);
 });
 
+/**
+ * Get conversation details
+ */
 exports.getConversationDetail = asyncHandler(async (req, res) => {
   const currentUserId = req.auth.userId;
   const { conversationId } = req.params;
@@ -150,12 +181,52 @@ exports.getConversationDetail = asyncHandler(async (req, res) => {
 
   const conversation = await Conversation.findById(conversationId);
 
-  if (!conversation || !conversation.members.includes(currentUserId)) {
+  if (!conversation) {
     return res.status(404).json({ message: "Conversation not found" });
+  }
+
+  // For global room, allow access to all users
+  if (!conversation.isGlobal && !conversation.members.includes(currentUserId)) {
+    return res.status(404).json({ message: "Conversation not found" });
+  }
+
+  // Add user to global room if accessing it
+  if (conversation.isGlobal && !conversation.members.includes(currentUserId)) {
+    conversation.members.push(currentUserId);
+    await conversation.save();
   }
 
   const profiles = await pickProfiles(conversation.members);
   const formatted = formatConversation(conversation, profiles, currentUserId);
 
   res.json(formatted);
+});
+
+/**
+ * Create group conversation
+ */
+exports.createGroup = asyncHandler(async (req, res) => {
+  const currentUserId = req.auth.userId;
+  const { name, memberIds } = req.body;
+
+  if (!name || !memberIds || !Array.isArray(memberIds) || memberIds.length === 0) {
+    return res.status(400).json({ message: "Name and at least one member are required" });
+  }
+
+  // Include current user in members
+  const allMembers = [...new Set([currentUserId, ...memberIds])];
+
+  const conversation = await Conversation.create({
+    name,
+    isGroup: true,
+    adminId: currentUserId,
+    members: allMembers,
+    lastMessageAt: new Date(),
+    unreadCounts: Object.fromEntries(allMembers.map(id => [id, 0]))
+  });
+
+  const profiles = await pickProfiles(conversation.members);
+  const formatted = formatConversation(conversation, profiles, currentUserId);
+
+  res.status(201).json(formatted);
 });

@@ -19,6 +19,7 @@ export default function ChatLayout({
   const [isLoadingConversations, setIsLoadingConversations] = useState(false);
   const [error, setError] = useState(null);
 
+  // Load conversations
   const refreshConversations = useCallback(async () => {
     setError(null);
     setIsLoadingConversations(true);
@@ -32,6 +33,7 @@ export default function ChatLayout({
     }
   }, [api]);
 
+  // Load user directory
   const refreshDirectory = useCallback(async () => {
     try {
       const list = await api.users.list();
@@ -41,12 +43,32 @@ export default function ChatLayout({
     }
   }, [api, currentUserId]);
 
+  // NEW: Create group conversation
+  const handleCreateGroup = useCallback(async (groupData) => {
+    try {
+      const conversation = await api.conversations.createGroup(groupData);
+      
+      // Add new group to conversations list and set as active
+      setConversations((prev) => [conversation, ...prev]);
+      setActiveConversationId(conversation.id);
+      setActiveConversation(conversation);
+      
+      return conversation;
+    } catch (err) {
+      setError("Unable to create group. Please try again.");
+      throw err; // Re-throw so dialog can handle it
+    }
+  }, [api]);
+
+  // Initial setup
   useEffect(() => {
     if (!currentUserId) return;
     let active = true;
     setIsBootstrapping(true);
+    
     (async () => {
       try {
+        // Sync user profile with backend
         await api.users.syncProfile({
           displayName: currentName,
           avatarUrl: currentAvatar,
@@ -54,6 +76,8 @@ export default function ChatLayout({
         });
 
         if (!active) return;
+        
+        // Load conversations and directory
         await Promise.all([refreshConversations(), refreshDirectory()]);
       } catch (err) {
         if (active) {
@@ -79,6 +103,7 @@ export default function ChatLayout({
     refreshDirectory
   ]);
 
+  // Update active conversation when ID changes
   useEffect(() => {
     if (!activeConversationId) {
       setActiveConversation(null);
@@ -90,6 +115,7 @@ export default function ChatLayout({
     }
   }, [activeConversationId, conversations]);
 
+  // Select conversation handler
   const handleSelectConversation = useCallback(async (conversationId) => {
     if (!conversationId) {
       setActiveConversationId(null);
@@ -115,6 +141,7 @@ export default function ChatLayout({
     }
   }, [api, conversations]);
 
+  // Start 1-on-1 conversation
   const handleStartConversation = useCallback(async (targetUserId) => {
     try {
       const conversation = await api.conversations.ensureConversation(targetUserId);
@@ -134,6 +161,7 @@ export default function ChatLayout({
     }
   }, [api]);
 
+  // Mark conversation as seen (reset unread count)
   const handleConversationSeen = useCallback((conversationId) => {
     setConversations((prev) =>
       prev.map((conversation) =>
@@ -144,6 +172,7 @@ export default function ChatLayout({
     );
   }, []);
 
+  // Update conversations list when new message is sent
   const handleMessageSent = useCallback((conversationId, message) => {
     setConversations((prev) => {
       const next = prev.map((conversation) => {
@@ -162,6 +191,7 @@ export default function ChatLayout({
         };
       });
 
+      // Re-sort conversations by last message time
       next.sort(
         (a, b) =>
           new Date(b.lastMessageAt || b.createdAt).getTime() -
@@ -183,6 +213,7 @@ export default function ChatLayout({
         isLoadingConversations={isLoadingConversations}
         onSelectConversation={handleSelectConversation}
         onStartConversation={handleStartConversation}
+        onCreateGroup={handleCreateGroup} // NEW: Pass group creation handler
         onRefresh={refreshConversations}
         error={error}
         activeConversationId={activeConversationId}
@@ -190,6 +221,7 @@ export default function ChatLayout({
 
       <ChatWindow
         messagesApi={api.messages}
+        uploadApi={api.upload} // NEW: Pass upload API
         conversation={activeConversation}
         conversationId={activeConversationId}
         currentUser={{

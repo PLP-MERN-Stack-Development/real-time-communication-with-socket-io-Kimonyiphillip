@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import MessageBubble from "./MessageBubble";
 import { Badge } from "./ui/badge";
 import { Avatar } from "./ui/avatar";
@@ -6,6 +6,8 @@ import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { cn } from "../lib/utils";
 import { useSocket } from "../hooks/useSocket";
+import FileUpload from "./FileUpload";
+import TypingIndicator from "./TypingIndicator";
 
 const longDateFormatter = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",
@@ -26,7 +28,7 @@ export default function ChatWindow({
     if (messagesApi) return messagesApi;
     return {
       async list() {
-        return [];
+        return { messages: [], pagination: {} };
       },
       async send() {
         throw new Error("messagesApi not provided");
@@ -39,12 +41,22 @@ export default function ChatWindow({
   const [isLoading, setIsLoading] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [error, setError] = useState(null);
+  const [hasMore, setHasMore] = useState(true);
+  const [page, setPage] = useState(1);
   const viewportRef = useRef(null);
   const conversationIdRef = useRef(conversationId);
+  const typingTimeoutRef = useRef(null);
 
-  const socket = useSocket(currentUserId);
+  const {
+    socket,
+    onlineUsers,
+    typingUsers,
+    startTyping,
+    stopTyping,
+    sendReaction
+  } = useSocket(currentUserId);
 
-  // determine the other participant
+  // Determine the other participant
   const otherMember = useMemo(() => {
     if (!conversation || !currentUser?.id) return null;
     if (conversation.isGroup) return null;
@@ -55,23 +67,38 @@ export default function ChatWindow({
     );
   }, [conversation, currentUser]);
 
-  // reset state when changing conversations
+  // Check if other user is online
+  const isOtherUserOnline = useMemo(() => {
+    if (!otherMember) return false;
+    return onlineUsers.has(otherMember.clerkUserId);
+  }, [otherMember, onlineUsers]);
+
+  // Get typing users for current conversation
+  const currentTypingUsers = useMemo(() => {
+    if (!conversationId) return new Set();
+    return typingUsers.get(conversationId) || new Set();
+  }, [typingUsers, conversationId]);
+
+  // Reset state when changing conversations
   useEffect(() => {
     setMessages([]);
     setDraft("");
     setError(null);
+    setPage(1);
+    setHasMore(true);
   }, [conversationId]);
 
-  // load conversation history
+  // Load conversation history
   useEffect(() => {
     if (!conversationId) return;
     let active = true;
     setIsLoading(true);
     (async () => {
       try {
-        const data = await service.list(conversationId);
+        const data = await service.list(conversationId, 1);
         if (!active) return;
-        setMessages(Array.isArray(data) ? data : []);
+        setMessages(Array.isArray(data.messages) ? data.messages : []);
+        setHasMore(data.pagination?.hasMore || false);
         onConversationSeen?.(conversationId);
       } catch (err) {
         if (active) {
@@ -88,7 +115,7 @@ export default function ChatWindow({
     };
   }, [service, conversationId, onConversationSeen]);
 
-  // auto-scroll to bottom when new messages arrive
+  // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
     const node = viewportRef.current;
     if (!node) return;
@@ -96,56 +123,115 @@ export default function ChatWindow({
       top: node.scrollHeight,
       behavior: "smooth",
     });
-  }, [messages]);
+  }, [messages, currentTypingUsers]);
 
-  // join conversation room via socket.io
+  // Join conversation room via socket.io
   useEffect(() => {
     conversationIdRef.current = conversationId;
     if (!socket || !conversationId) return;
 
     socket.emit("conversation:join", conversationId);
 
-    // handle incoming messages in real-time
+    // Handle incoming messages in real-time
     const handleNewMessage = ({ conversationId: id, message }) => {
       if (id === conversationIdRef.current) {
         setMessages((prev) => {
-          // Check if message already exists to prevent duplicates
           const exists = prev.some(m => m._id === message._id);
           if (exists) return prev;
           return [...prev, message];
         });
+        // Play notification sound
+        playNotificationSound();
       }
     };
 
-    // handle conversation updates (e.g., unread counts)
-    const handleConversationUpdate = ({ conversationId: id }) => {
+    // Handle conversation updates
+    const handleConversationUpdate = ({ conversationId: id, unreadCount }) => {
       if (id === conversationIdRef.current) {
         onConversationSeen?.(id);
       }
     };
 
+    // Handle message reactions
+    const handleMessageReaction = ({ messageId, userId, reaction }) => {
+      setMessages(prev => prev.map(msg => 
+        msg._id === messageId 
+          ? {
+              ...msg,
+              reactions: [
+                ...(msg.reactions || []).filter(r => r.userId !== userId),
+                { userId, reaction, createdAt: new Date() }
+              ]
+            }
+          : msg
+      ));
+    };
+
     socket.on("message:new", handleNewMessage);
     socket.on("conversation:update", handleConversationUpdate);
+    socket.on("message:react", handleMessageReaction);
 
     return () => {
       socket.off("message:new", handleNewMessage);
       socket.off("conversation:update", handleConversationUpdate);
+      socket.off("message:react", handleMessageReaction);
       socket.emit("conversation:leave", conversationIdRef.current);
     };
   }, [socket, conversationId, onConversationSeen]);
 
-  // sending message handler
+  // Typing indicator handlers
+  const handleTypingStart = useCallback(() => {
+    if (!conversationId) return;
+    startTyping(conversationId);
+    
+    // Clear existing timeout
+    if (typingTimeoutRef.current) {
+      clearTimeout(typingTimeoutRef.current);
+    }
+    
+    // Set timeout to stop typing
+    typingTimeoutRef.current = setTimeout(() => {
+      stopTyping(conversationId);
+    }, 3000);
+  }, [conversationId, startTyping, stopTyping]);
+
+  const handleTypingStop = useCallback(() => {
+    if (!conversationId) return;
+    stopTyping(conversationId);
+    
+    if (typingTimeoutRef.current) {
+      clearTimeout(typingTimeoutRef.current);
+    }
+  }, [conversationId, stopTyping]);
+
+  // Load more messages (pagination)
+  const loadMoreMessages = async () => {
+    if (!hasMore || isLoading) return;
+    
+    try {
+      const nextPage = page + 1;
+      const data = await service.list(conversationId, nextPage);
+      
+      setMessages(prev => [...data.messages, ...prev]);
+      setPage(nextPage);
+      setHasMore(data.pagination?.hasMore || false);
+    } catch (err) {
+      setError("Failed to load more messages");
+    }
+  };
+
+  // Send message handler
   const handleSubmit = async (event) => {
     event.preventDefault();
     if (!draft.trim() || !conversationId) return;
 
     setIsSending(true);
     setError(null);
+    handleTypingStop();
 
     try {
       const nextMessage = await service.send(conversationId, draft.trim());
       
-      // Check if message already exists before adding
       setMessages((prev) => {
         const exists = prev.some(m => m._id === nextMessage._id);
         if (exists) return prev;
@@ -154,7 +240,7 @@ export default function ChatWindow({
       
       onMessageSent?.(conversationId, nextMessage);
 
-      // emit real-time event so others see instantly
+      // Emit real-time event
       socket?.emit("message:new", {
         conversationId,
         message: nextMessage,
@@ -167,6 +253,64 @@ export default function ChatWindow({
       setIsSending(false);
     }
   };
+
+  // File upload handler
+  const handleFileUpload = async (file) => {
+    if (!conversationId) return;
+    
+    try {
+      // Upload file first
+      const uploadResult = await messagesApi.upload.file(file);
+      
+      // Send message with file
+      const message = await service.send(
+        conversationId, 
+        "", 
+        file.type.startsWith("image/") ? "image" : "file",
+        {
+          fileUrl: uploadResult.fileUrl,
+          fileName: uploadResult.fileName,
+          fileSize: uploadResult.fileSize
+        }
+      );
+      
+      setMessages(prev => [...prev, message]);
+      onMessageSent?.(conversationId, message);
+      
+      // Emit real-time event
+      socket?.emit("message:new", {
+        conversationId,
+        message,
+      });
+    } catch (err) {
+      setError("Failed to upload file. Please try again.");
+    }
+  };
+
+  // Handle message reaction
+  const handleMessageReaction = async (messageId, reaction) => {
+    try {
+      await messagesApi.addReaction(messageId, reaction);
+      sendReaction(messageId, conversationId, reaction);
+    } catch (err) {
+      setError("Failed to add reaction");
+    }
+  };
+
+  // Notification sound
+  const playNotificationSound = () => {
+    const audio = new Audio("/notification.mp3");
+    audio.play().catch(() => {
+      // Silent fail if audio can't play
+    });
+  };
+
+  // Request notification permission
+  useEffect(() => {
+    if ("Notification" in window && Notification.permission === "default") {
+      Notification.requestPermission();
+    }
+  }, []);
 
   if (isBootstrapping) {
     return (
@@ -205,29 +349,48 @@ export default function ChatWindow({
               {conversation.name}
             </p>
             <p className="text-xs text-slate-400">
-              {otherMember?.lastSeenAt
-                ? `Last seen ${longDateFormatter.format(
-                    new Date(otherMember.lastSeenAt)
-                  )}`
-                : conversation.isGroup
-                ? `${conversation.members?.length || 0} participants`
-                : "Online"}
+              {conversation.isGlobal ? "Public Global Chat" : 
+               conversation.isGroup ? 
+                 `${conversation.members?.length || 0} participants` :
+                 isOtherUserOnline ? "Online" : "Offline"
+              }
             </p>
           </div>
         </div>
-        <Badge
-          variant="outline"
-          className="hidden rounded-full border-emerald-400/40 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-100 sm:inline-flex"
-        >
-          Live Socket Chat
-        </Badge>
+        <div className="flex items-center gap-2">
+          {conversation.isGlobal && (
+            <Badge variant="outline" className="bg-blue-500/10 text-blue-200">
+              Global
+            </Badge>
+          )}
+          <Badge
+            variant="outline"
+            className="rounded-full border-emerald-400/40 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-100"
+          >
+            Live Socket Chat
+          </Badge>
+        </div>
       </header>
 
       <div
         ref={viewportRef}
         className="custom-scroll flex-1 space-y-4 overflow-y-auto bg-chat-gradient px-6 py-6"
       >
-        {isLoading && (
+        {/* Load more button */}
+        {hasMore && (
+          <div className="flex justify-center">
+            <Button 
+              variant="outline" 
+              size="sm" 
+              onClick={loadMoreMessages}
+              disabled={isLoading}
+            >
+              {isLoading ? "Loading..." : "Load older messages"}
+            </Button>
+          </div>
+        )}
+
+        {isLoading && messages.length === 0 && (
           <div className="text-sm text-slate-300">Loading messages…</div>
         )}
 
@@ -244,18 +407,37 @@ export default function ChatWindow({
             isMine={message.senderId === currentUser.id}
             currentUser={currentUser}
             otherMember={otherMember}
+            onReaction={handleMessageReaction}
           />
         ))}
+
+        {/* Typing indicator */}
+        <TypingIndicator 
+          typingUsers={currentTypingUsers}
+          conversation={conversation}
+          currentUserId={currentUserId}
+        />
       </div>
 
       <footer className="border-t border-white/10 bg-white/[0.04] px-6 py-4">
-        <form onSubmit={handleSubmit} className="flex items-center gap-3">
-          <Input
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            placeholder="Write a message..."
-            disabled={isSending}
-          />
+        <form onSubmit={handleSubmit} className="flex items-end gap-3">
+          <div className="flex-1 space-y-2">
+            <FileUpload onFileUpload={handleFileUpload} />
+            <Input
+              value={draft}
+              onChange={(event) => {
+                setDraft(event.target.value);
+                if (event.target.value.trim()) {
+                  handleTypingStart();
+                } else {
+                  handleTypingStop();
+                }
+              }}
+              onBlur={handleTypingStop}
+              placeholder="Write a message..."
+              disabled={isSending}
+            />
+          </div>
           <Button
             type="submit"
             disabled={!draft.trim() || isSending}

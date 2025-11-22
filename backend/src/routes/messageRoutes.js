@@ -15,4 +15,10 @@ router.post(
   messageController.sendMessage
 );
 
+router.post(
+  "/:messageId/reaction",
+  requireAuth,
+  messageController.addReaction
+);
+
 module.exports = router;

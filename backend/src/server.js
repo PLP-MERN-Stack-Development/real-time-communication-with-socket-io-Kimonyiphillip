@@ -3,6 +3,7 @@ const cors = require("cors");
 const dotenv = require("dotenv");
 const http = require("http");
 const { Server } = require("socket.io");
+const path = require("path");
 
 const { connectDB } = require("./config/db");
 const { socketAuthMiddleware } = require("./middleware/socketAuth");
@@ -14,6 +15,7 @@ const httpServer = http.createServer(app);
 
 connectDB();
 
+// CORS Configuration
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || process.env.ALLOWED_ORIGIN || "")
   .split(",")
   .map(origin => origin.trim())
@@ -48,6 +50,7 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 
+// Socket.io Configuration
 const io = new Server(httpServer, {
   cors: {
     origin: corsOrigins,
@@ -58,28 +61,42 @@ const io = new Server(httpServer, {
 
 global.io = io;
 
+// Enhanced user presence tracking with online status
 const userPresence = new Map();
 
+// Socket.io middleware for authentication
 io.use(socketAuthMiddleware);
 
-app.use(express.json({ limit: "1mb" }));
+// Middleware
+app.use(express.json({ limit: "10mb" })); // Increased for file uploads
 app.use(express.urlencoded({ extended: true }));
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
+// Basic routes
 app.get("/", (req, res) => res.send("Chat API OK"));
 app.get("/healthz", (req, res) => res.json({ status: "ok" }));
 
+// API Routes
 const conversationRoutes = require("./routes/conversationRoutes");
 const messageRoutes = require("./routes/messageRoutes");
 const userRoutes = require("./routes/userRoutes");
+const uploadRoutes = require("./routes/uploadRoutes");
 
 app.use("/api/conversations", conversationRoutes);
 app.use("/api/messages", messageRoutes);
 app.use("/api/users", userRoutes);
+app.use("/api/upload", uploadRoutes);
 
+// Global chat room initialization
+const { ensureGlobalRoom } = require("./utils/globalRoom");
+ensureGlobalRoom();
+
+// 404 Handler
 app.use((req, res) => {
   res.status(404).json({ message: "Not Found" });
 });
 
+// Error Handler
 app.use((err, req, res, next) => {
   const status = err.statusCode || 500;
   const response = {
@@ -91,13 +108,33 @@ app.use((err, req, res, next) => {
   res.status(status).json(response);
 });
 
+// Enhanced Socket.io Event Handlers
 io.on("connection", (socket) => {
   const { userId } = socket.data;
+  
   if (userId) {
-    userPresence.set(userId, socket.id);
+    // User comes online
+    userPresence.set(userId, {
+      socketId: socket.id,
+      status: "online",
+      lastSeen: new Date()
+    });
+    
+    // Broadcast user online status to all connected clients
+    socket.broadcast.emit("user:status", {
+      userId,
+      status: "online",
+      lastSeen: new Date()
+    });
+    
+    // Join user's personal room for private notifications
     socket.join(userId);
+    
+    // Join global room by default
+    socket.join("global");
   }
 
+  // Conversation management
   socket.on("conversation:join", (conversationId) => {
     if (conversationId) {
       socket.join(conversationId);
@@ -110,15 +147,57 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("message:new", ({ conversationId, message }) => {
-    if (conversationId && message) {
-      socket.to(conversationId).emit("message:new", { conversationId, message });
+  // Typing indicators
+  socket.on("typing:start", (data) => {
+    const { conversationId } = data;
+    if (conversationId) {
+      socket.to(conversationId).emit("typing:start", {
+        userId: socket.data.userId,
+        conversationId
+      });
     }
   });
 
+  socket.on("typing:stop", (data) => {
+    const { conversationId } = data;
+    if (conversationId) {
+      socket.to(conversationId).emit("typing:stop", {
+        userId: socket.data.userId,
+        conversationId
+      });
+    }
+  });
+
+  // Message reactions
+  socket.on("message:react", async (data) => {
+    const { messageId, conversationId, reaction } = data;
+    if (messageId && conversationId && reaction) {
+      // Broadcast reaction to all users in conversation
+      socket.to(conversationId).emit("message:react", {
+        messageId,
+        userId: socket.data.userId,
+        reaction,
+        conversationId
+      });
+    }
+  });
+
+  // Handle disconnection
   socket.on("disconnect", () => {
     if (userId) {
-      userPresence.delete(userId);
+      // Update user status to offline
+      userPresence.set(userId, {
+        socketId: null,
+        status: "offline",
+        lastSeen: new Date()
+      });
+      
+      // Broadcast user offline status
+      socket.broadcast.emit("user:status", {
+        userId,
+        status: "offline",
+        lastSeen: new Date()
+      });
     }
   });
 });

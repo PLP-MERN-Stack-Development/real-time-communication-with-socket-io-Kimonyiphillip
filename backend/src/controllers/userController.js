@@ -1,6 +1,7 @@
 const UserProfile = require("../models/UserProfile");
 const asyncHandler = require("../utils/asyncHandler");
 
+// Get all users
 exports.listUsers = asyncHandler(async (req, res) => {
   const profiles = await UserProfile.find()
     .select("clerkUserId displayName avatarUrl email lastSeenAt")
@@ -9,6 +10,7 @@ exports.listUsers = asyncHandler(async (req, res) => {
   res.json(profiles);
 });
 
+// Sync user profile with Clerk data
 exports.syncProfile = asyncHandler(async (req, res) => {
   const userId = req.auth.userId;
   const { displayName, avatarUrl, email } = req.body;

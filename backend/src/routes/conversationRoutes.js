@@ -15,6 +15,12 @@ router.post(
   conversationController.ensureConversation
 );
 
+router.post(
+  "/group",
+  requireAuth,
+  conversationController.createGroup
+);
+
 router.get(
   "/:conversationId",
   requireAuth,

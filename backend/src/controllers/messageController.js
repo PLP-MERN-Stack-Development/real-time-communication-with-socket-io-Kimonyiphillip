@@ -4,6 +4,9 @@ const Message = require("../models/Message");
 const UserProfile = require("../models/UserProfile");
 const asyncHandler = require("../utils/asyncHandler");
 
+/**
+ * Check if user has access to conversation and return conversation
+ */
 const ensureConversationAccess = async (conversationId, currentUserId) => {
   if (!mongoose.Types.ObjectId.isValid(conversationId)) {
     const error = new Error("Invalid conversation id");
@@ -27,16 +30,29 @@ const ensureConversationAccess = async (conversationId, currentUserId) => {
   return conversation;
 };
 
+/**
+ * Get messages for a conversation with pagination
+ */
 exports.getMessagesForConversation = asyncHandler(async (req, res) => {
   const currentUserId = req.auth.userId;
   const { conversationId } = req.params;
+  const { page = 1, limit = 50 } = req.query;
 
   const conversation = await ensureConversationAccess(conversationId, currentUserId);
 
+  // Calculate pagination
+  const skip = (page - 1) * limit;
+
   let messages = await Message.find({ conversationId })
-    .sort({ createdAt: 1 })
+    .sort({ createdAt: -1 }) // Get newest first for pagination
+    .skip(skip)
+    .limit(parseInt(limit))
     .lean();
 
+  // Reverse to show oldest first in UI
+  messages = messages.reverse();
+
+  // Mark messages as seen
   if (messages.length > 0) {
     await Message.updateMany(
       {
@@ -51,6 +67,7 @@ exports.getMessagesForConversation = asyncHandler(async (req, res) => {
     );
   }
 
+  // Update read status for real-time
   messages = messages.map((message) => {
     const readBy = Array.isArray(message.readBy) ? message.readBy : [];
     const hasRead = readBy.includes(currentUserId);
@@ -63,6 +80,7 @@ exports.getMessagesForConversation = asyncHandler(async (req, res) => {
     };
   });
 
+  // Reset unread count for this user
   if (!conversation.unreadCounts) {
     conversation.unreadCounts = new Map();
   }
@@ -73,15 +91,33 @@ exports.getMessagesForConversation = asyncHandler(async (req, res) => {
   }
   await conversation.save();
 
-  res.json(messages);
+  res.json({
+    messages,
+    pagination: {
+      page: parseInt(page),
+      limit: parseInt(limit),
+      hasMore: messages.length === parseInt(limit)
+    }
+  });
 });
 
+/**
+ * Send a new message (text, image, or file)
+ */
 exports.sendMessage = asyncHandler(async (req, res) => {
   const currentUserId = req.auth.userId;
-  const { conversationId, text } = req.body;
+  const { conversationId, text, type = "text", fileUrl, fileName, fileSize } = req.body;
 
-  if (!conversationId || !text?.trim()) {
-    return res.status(400).json({ message: "conversationId and text are required" });
+  if (!conversationId) {
+    return res.status(400).json({ message: "conversationId is required" });
+  }
+
+  if (type === "text" && !text?.trim()) {
+    return res.status(400).json({ message: "Text is required for text messages" });
+  }
+
+  if ((type === "image" || type === "file") && !fileUrl) {
+    return res.status(400).json({ message: "fileUrl is required for file messages" });
   }
 
   const conversation = await ensureConversationAccess(conversationId, currentUserId);
@@ -98,11 +134,17 @@ exports.sendMessage = asyncHandler(async (req, res) => {
     senderId: currentUserId,
     senderName: profile.displayName,
     senderAvatar: profile.avatarUrl,
-    text: text.trim(),
+    text: text?.trim() || "",
+    type,
+    fileUrl: fileUrl || "",
+    fileName: fileName || "",
+    fileSize: fileSize || 0,
     readBy: [currentUserId],
-    status: "sent"
+    status: "sent",
+    reactions: []
   });
 
+  // Update conversation unread counts and last message
   if (!conversation.unreadCounts) {
     conversation.unreadCounts = new Map();
   }
@@ -120,17 +162,20 @@ exports.sendMessage = asyncHandler(async (req, res) => {
   conversation.members.forEach(updateUnread);
 
   conversation.lastMessage = {
-    text: message.text,
+    text: type === "text" ? message.text : `Sent a ${type}`,
     senderId: message.senderId,
     senderName: message.senderName,
     senderAvatar: message.senderAvatar,
-    createdAt: message.createdAt
+    createdAt: message.createdAt,
+    type: message.type
   };
   conversation.lastMessageAt = message.createdAt;
 
   await conversation.save();
 
+  // Real-time broadcasting
   if (global.io) {
+    // Send to conversation room
     global.io.to(conversationId).emit("message:new", {
       conversationId, 
       message: {
@@ -140,19 +185,89 @@ exports.sendMessage = asyncHandler(async (req, res) => {
         senderName: message.senderName,
         senderAvatar: message.senderAvatar,
         text: message.text,
+        type: message.type,
+        fileUrl: message.fileUrl,
+        fileName: message.fileName,
+        fileSize: message.fileSize,
         status: message.status,
         readBy: message.readBy,
+        reactions: message.reactions,
         createdAt: message.createdAt,
         updatedAt: message.updatedAt
       }
     });
 
+    // Notify conversation members of update
     conversation.members
       .filter((memberId) => memberId !== currentUserId)
       .forEach((memberId) => {
-        global.io.to(memberId).emit("conversation:update", { conversationId });
+        global.io.to(memberId).emit("conversation:update", { 
+          conversationId,
+          unreadCount: conversation.unreadCounts instanceof Map 
+            ? conversation.unreadCounts.get(memberId) || 0
+            : conversation.unreadCounts[memberId] || 0
+        });
+      });
+
+    // Send notification for new messages
+    conversation.members
+      .filter((memberId) => memberId !== currentUserId)
+      .forEach((memberId) => {
+        global.io.to(memberId).emit("notification:new", {
+          type: "new_message",
+          conversationId,
+          message: {
+            text: type === "text" ? text : `Sent a ${type}`,
+            senderName: message.senderName
+          }
+        });
       });
   }
 
   res.status(201).json(message);
+});
+
+/**
+ * Add reaction to a message
+ */
+exports.addReaction = asyncHandler(async (req, res) => {
+  const currentUserId = req.auth.userId;
+  const { messageId } = req.params;
+  const { reaction } = req.body;
+
+  if (!messageId || !reaction) {
+    return res.status(400).json({ message: "messageId and reaction are required" });
+  }
+
+  const message = await Message.findById(messageId);
+  if (!message) {
+    return res.status(404).json({ message: "Message not found" });
+  }
+
+  // Check if user has access to the conversation
+  await ensureConversationAccess(message.conversationId, currentUserId);
+
+  // Remove existing reaction from this user
+  message.reactions = message.reactions.filter(r => r.userId !== currentUserId);
+  
+  // Add new reaction
+  message.reactions.push({
+    userId: currentUserId,
+    reaction,
+    createdAt: new Date()
+  });
+
+  await message.save();
+
+  // Broadcast reaction in real-time
+  if (global.io) {
+    global.io.to(message.conversationId.toString()).emit("message:react", {
+      messageId: message._id,
+      userId: currentUserId,
+      reaction,
+      conversationId: message.conversationId
+    });
+  }
+
+  res.json(message);
 });
